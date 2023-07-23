@@ -87,7 +87,10 @@ static int dev_release(struct inode *inodep, struct file *filep) {
 }
 
 static ssize_t dev_write(struct file* filep, const char* phrase, size_t len, loff_t* offset) { 
-	if(bufferIsFull) return -1;
+	if(bufferIsFull && filep->f_flags & O_NONBLOCK)
+		return -EAGAIN;
+	if(wait_event_interruptible(wq_write, !bufferIsFull))
+		return -ERESTARTSYS;
 
 	char temp[256];
 	memset(temp, 0, 256);
@@ -111,7 +114,10 @@ static ssize_t dev_write(struct file* filep, const char* phrase, size_t len, lof
 }
 
 static ssize_t dev_read(struct file* filep, char* phrase, size_t len, loff_t* offset) {
-	wait_event_interruptible(wq_read, head != tail || bufferIsFull);
+	if(head == tail && !bufferIsFull && (filep->f_flags & O_NONBLOCK))
+		return -EAGAIN;
+	if(wait_event_interruptible(wq_read, head != tail || bufferIsFull))
+		return -ERESTARTSYS;
 
 	bufferIsFull = 0;
 	char temp[256];
@@ -122,6 +128,8 @@ static ssize_t dev_read(struct file* filep, char* phrase, size_t len, loff_t* of
 		if(*tail == 0) tail = buffer;
 	}while(len-- && head != tail);
 	*ptr = 0;
+
+	wake_up_interruptible(&wq_write);
 
 	memset(phrase, 0, BUFFER_SIZE);
 	copy_to_user(phrase, temp, strlen(temp));
